@@ -41,6 +41,20 @@ from supermimic.utils.helpers import (
 from supermimic.utils.logger import Logger
 from supermimic.utils.wandb_artifacts import download_model_dir, log_model_artifact
 
+DEFAULT_LOG_DIR = "logs"
+"""Fallback run root used when ``--runner.log-dir`` is not given."""
+
+
+def resolve_log_root(log_dir: str | None = None) -> Path:
+  """Resolve where runs are written: ``--runner.log-dir`` > ``./logs``.
+
+  Keeping this in one place means checkpoints, console logs and the W&B run
+  directory always live under the same root, which is what you want to bind
+  mount when the code itself is baked into an image.
+  """
+  return Path(log_dir) if log_dir else Path(DEFAULT_LOG_DIR)
+
+
 
 @dataclass
 class BaseRunnerCfg:
@@ -48,6 +62,12 @@ class BaseRunnerCfg:
 
   wandb_project: str = "supermimic"
   run_name: str | None = None
+  log_dir: str | None = None
+  """Root directory for checkpoints, console logs and the W&B run.
+
+  Defaults to ``logs`` relative to the current working directory. Set it
+  explicitly when the code is installed in a read-only location, e.g.
+  ``--runner.log-dir /workspace/rl/outputs``."""
   wandb_run_path: str | None = None
   headless: bool = True
   buffer_size: int = 1000
@@ -455,10 +475,14 @@ class BaseRunner[CfgT: BaseRunnerCfg]:
     """Subclasses override to update the actor obs normalizer."""
     raise NotImplementedError
 
+  def _log_root(self) -> Path:
+    """Root directory for this run (see :func:`resolve_log_root`)."""
+    return resolve_log_root(self.cfg.log_dir)
+
   def _create_log_dir(self, *extra_parts: str) -> Path:
     """Create and return a timestamped log directory."""
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    log_dir = Path("logs", self.task_id, *extra_parts, timestamp)
+    log_dir = self._log_root().joinpath(self.task_id, *extra_parts, timestamp)
     log_dir.mkdir(parents=True, exist_ok=True)
     print(f"[INFO] Logging to {log_dir}")
     return log_dir
@@ -475,6 +499,8 @@ class BaseRunner[CfgT: BaseRunnerCfg]:
       project=self.cfg.wandb_project,
       name=self.cfg.run_name or default_name,
       config=wandb_config,
+      # 和 checkpoint 放在同一个根目录下（wandb/<run>），方便一次性挂载/备份
+      dir=str(self._log_root()),
     )
 
     if self.registry_name:
@@ -672,7 +698,6 @@ class SuperMimicRunner(BaseRunner[SuperMimicRunnerCfg]):
     wm_learn_time = 0.0
     policy_learn_time = 0.0
     loss_dict: dict[str, torch.Tensor] = {}
-    log_count = 0
     uploader = ThreadPoolExecutor(max_workers=1)
     upload: Future | None = None
 
@@ -705,8 +730,10 @@ class SuperMimicRunner(BaseRunner[SuperMimicRunnerCfg]):
         collect_time = elapsed_time - total_train_time
 
         self.logger.log(
-          it=log_count,
-          total_it=self.cfg.max_iterations // self.cfg.log_interval,
+          # 显示真实迭代进度（此前 it 是日志条数、total_it 又被 log_interval 除过，
+          # 导致 20000 it / log_interval=20 显示成 1000，容易被误读成训练只有 1000 步）
+          it=step + 1,
+          total_it=self.cfg.max_iterations,
           collect_time=collect_time,
           wm_learn_time=wm_learn_time,
           policy_learn_time=policy_learn_time,
@@ -714,7 +741,6 @@ class SuperMimicRunner(BaseRunner[SuperMimicRunnerCfg]):
           num_collected_steps=num_collected_steps,
         )
 
-        log_count += 1
         start_time = time.time()
         wm_learn_time = 0
         policy_learn_time = 0

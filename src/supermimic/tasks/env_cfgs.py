@@ -163,6 +163,13 @@ def gencoord_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   """Create generalized-coordinate world model environment configuration based on G1 tracking."""
   cfg = unitree_g1_flat_tracking_env_cfg(play=play)
 
+  # 关掉每条世界/每次求解迭代都打印的 "linesearch iterations limit reached"（几千 env 会刷屏）
+  cfg.sim.warn_ls_iterations = False
+
+  # mjlab 默认 nconmax=35（每个 world 的 broadphase 候选接触预算），G1 落地/初始穿插时会
+  # 超过 35 → "broadphase overflow" 警告 + 多余候选接触被丢掉。抬到 64，代价可忽略。
+  cfg.sim.nconmax = 64
+
   cfg.commands["motion"].anchor_body_name = "pelvis"
 
   cfg.observations["actor"] = _sensor_actor_group()
